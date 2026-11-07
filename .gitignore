@@ -1,0 +1,18 @@
+# 构建产物
+build/
+dist/
+*.spec
+
+# Python
+__pycache__/
+*.pyc
+
+# 运行期生成的本地配置（每个用户自己的）
+config.json
+
+# 验证脚本临时产物
+verify_shot.png
+
+# Excel 临时锁定文件
+~$*
+resp.json
