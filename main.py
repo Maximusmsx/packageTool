@@ -3,8 +3,10 @@
 
 功能：
 1. 配置多个「打包目录 + 打包名前缀」，保存在 config.json（与 exe 同目录）。
-2. 每个打包目录下找形如 yyyy-mm-dd 的子目录，取日期最大的那个，压缩为 <前缀><日期>.rar。
-3. 全部子包完成后，把子包一起压缩成「桌面\\<打包名>.rar」，并清理中间临时文件。
+2. 打包前弹窗勾选本次要打包的目录（默认全选，支持全选/反选）。
+3. 每个打包目录下找形如 yyyy-mm-dd 的子目录，取日期最大的那个，压缩为 <前缀><日期>.rar。
+4. 全部子包完成后，把子包一起压缩成「桌面\\<打包名>.rar」，并清理中间临时文件。
+5. 打包进度显示在主界面内嵌进度条上，不弹进度窗口。
 """
 
 import io
@@ -285,52 +287,131 @@ def run_pack(items, pack_name, rar_exe, log, progress=None, cancel=None):
 # --------------------------------------------------------------------------
 # 界面
 # --------------------------------------------------------------------------
-class ProgressWindow(tk.Toplevel):
-    def __init__(self, master, title):
+class SelectDirsDialog(tk.Toplevel):
+    """打包前勾选本次要打包的目录，默认全选。"""
+
+    CHECKED = "☑"
+    UNCHECKED = "☐"
+
+    def __init__(self, master, items):
         tk.Toplevel.__init__(self, master)
-        self.title(title)
-        self.geometry("640x360")
-        self.minsize(520, 260)
-        self.transient(master)
-        self.protocol("WM_DELETE_WINDOW", lambda: None)
+        self.title("选择要打包的目录")
+        self.resizable(True, True)
+        self.minsize(640, 320)
+        self.result = None  # None 表示取消，否则为勾选的配置项列表
+        self.items = list(items)
+        self.checked = [True] * len(self.items)
 
         body = ttk.Frame(self, padding=10)
         body.pack(fill="both", expand=True)
 
-        text_frame = ttk.Frame(body)
-        text_frame.pack(fill="both", expand=True)
+        head = ttk.Frame(body)
+        head.pack(fill="x")
+        ttk.Label(head, text="单击行可勾选/取消，默认全选：").pack(side="left")
+        self.count_var = tk.StringVar()
+        ttk.Label(head, textvariable=self.count_var).pack(side="right")
 
-        self.text = tk.Text(text_frame, height=12, wrap="word", state="disabled",
-                            font=("Microsoft YaHei UI", 9))
-        yscroll = ttk.Scrollbar(text_frame, orient="vertical", command=self.text.yview)
-        self.text.configure(yscrollcommand=yscroll.set)
-        yscroll.pack(side="right", fill="y")
-        self.text.pack(side="left", fill="both", expand=True)
+        table = ttk.Frame(body)
+        table.pack(fill="both", expand=True, pady=(6, 8))
 
-        self.bar = ttk.Progressbar(body, mode="determinate", maximum=100)
-        self.bar.pack(fill="x", pady=(8, 8))
+        columns = ("chk", "idx", "dir", "prefix")
+        self.tree = ttk.Treeview(table, columns=columns, show="headings", selectmode="browse")
+        self.tree.heading("chk", text="选择")
+        self.tree.heading("idx", text="序号")
+        self.tree.heading("dir", text="打包目录")
+        self.tree.heading("prefix", text="打包名前缀")
+        self.tree.column("chk", width=56, anchor="center", stretch=False)
+        self.tree.column("idx", width=56, anchor="center", stretch=False)
+        self.tree.column("dir", width=420, anchor="w")
+        self.tree.column("prefix", width=180, anchor="w", stretch=False)
 
-        bottom = ttk.Frame(body)
-        bottom.pack(fill="x")
-        self.status = ttk.Label(bottom, text="正在打包…")
-        self.status.pack(side="left")
-        self.btn_close = ttk.Button(bottom, text="关闭", command=self.destroy, state="disabled")
-        self.btn_close.pack(side="right")
+        vsb = ttk.Scrollbar(table, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vsb.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
 
-    def log(self, msg):
-        self.text.configure(state="normal")
-        self.text.insert("end", msg + "\n")
-        self.text.see("end")
-        self.text.configure(state="disabled")
+        for i, item in enumerate(self.items):
+            self.tree.insert("", "end", iid=str(i),
+                             values=(self.CHECKED, i + 1, item["dir"], item["prefix"]))
 
-    def set_progress(self, value):
-        self.bar["value"] = max(0.0, min(100.0, float(value)))
+        self.tree.bind("<Button-1>", self._on_click)
+        self.tree.bind("<space>", lambda e: self._toggle_many(self.tree.selection()))
+        self.tree.bind("<Double-1>", self._on_double_click)
 
-    def finish(self, ok, text):
-        self.status.configure(text=text)
-        self.btn_close.configure(state="normal")
-        if ok:
-            self.set_progress(100)
+        btns = ttk.Frame(body)
+        btns.pack(fill="x")
+        ttk.Button(btns, text="全选", width=10, command=lambda: self._set_all(True)).pack(side="left")
+        ttk.Button(btns, text="反选", width=10, command=self._invert).pack(side="left", padx=(8, 0))
+        ttk.Button(btns, text="确定", width=10, command=self.on_ok).pack(side="right")
+        ttk.Button(btns, text="取消", width=10, command=self.destroy).pack(side="right", padx=(0, 8))
+
+        self.bind("<Return>", lambda e: self.on_ok())
+        self.bind("<Escape>", lambda e: self.destroy())
+
+        self._update_count()
+        self.transient(master)
+        self.grab_set()
+        self.geometry("760x420")
+        self.update_idletasks()
+        self._center(master)
+        self.after(50, lambda: self.focus_force())
+
+    def _center(self, master):
+        w, h = self.winfo_width(), self.winfo_height()
+        x = master.winfo_rootx() + (master.winfo_width() - w) // 2
+        y = master.winfo_rooty() + (master.winfo_height() - h) // 3
+        self.geometry("+%d+%d" % (max(0, x), max(0, y)))
+
+    # ---------------- 勾选 ----------------
+    def _on_click(self, event):
+        if self.tree.identify_region(event.x, event.y) != "cell":
+            return
+        row = self.tree.identify_row(event.y)
+        if row:
+            self._toggle(row)
+
+    def _on_double_click(self, event):
+        return "break"
+
+    def _toggle(self, iid):
+        try:
+            i = int(iid)
+        except (TypeError, ValueError):
+            return
+        if 0 <= i < len(self.checked):
+            self.checked[i] = not self.checked[i]
+            self._paint(i)
+
+    def _toggle_many(self, iids):
+        for iid in iids:
+            self._toggle(iid)
+
+    def _paint(self, i):
+        self.tree.set(str(i), "chk", self.CHECKED if self.checked[i] else self.UNCHECKED)
+        self._update_count()
+
+    def _set_all(self, value):
+        self.checked = [value] * len(self.items)
+        for i in range(len(self.items)):
+            self.tree.set(str(i), "chk", self.CHECKED if value else self.UNCHECKED)
+        self._update_count()
+
+    def _invert(self):
+        self.checked = [not c for c in self.checked]
+        for i in range(len(self.items)):
+            self.tree.set(str(i), "chk", self.CHECKED if self.checked[i] else self.UNCHECKED)
+        self._update_count()
+
+    def _update_count(self):
+        self.count_var.set("已选 %d / %d" % (sum(self.checked), len(self.checked)))
+
+    def on_ok(self):
+        chosen = [item for item, c in zip(self.items, self.checked) if c]
+        if not chosen:
+            messagebox.showwarning("提示", "请至少勾选一个打包目录。", parent=self)
+            return
+        self.result = chosen
+        self.destroy()
 
 
 class AddDialog(tk.Toplevel):
@@ -415,12 +496,11 @@ class App(object):
         self.geometry = cfg["geometry"]
         self.msg_queue = queue.Queue()
         self.worker = None
-        self.progress_win = None
         self.cancel_flag = threading.Event()
 
         self.root.title(APP_TITLE)
-        self.root.geometry(self.geometry if GEOMETRY_RE.match(self.geometry) else "880x420")
-        self.root.minsize(720, 340)
+        self.root.geometry(self.geometry if GEOMETRY_RE.match(self.geometry) else "880x460")
+        self.root.minsize(720, 380)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         self._build_ui()
@@ -489,6 +569,16 @@ class App(object):
         self.name_entry.bind("<FocusOut>", lambda e: self.save())
         self.start_btn = ttk.Button(bottom, text="开始打包", width=14, command=self.start_pack)
         self.start_btn.pack(side="right")
+
+        # 进度区：直接嵌在主界面，不弹窗
+        prog = ttk.Frame(outer)
+        prog.pack(fill="x", pady=(10, 0))
+        self.progress_var = tk.DoubleVar(value=0.0)
+        self.progress_bar = ttk.Progressbar(prog, mode="determinate", maximum=100,
+                                            variable=self.progress_var)
+        self.progress_bar.pack(side="left", fill="x", expand=True)
+        self.pct_var = tk.StringVar(value="")
+        ttk.Label(prog, textvariable=self.pct_var, width=6, anchor="e").pack(side="left", padx=(8, 0))
 
         self.status_var = tk.StringVar(value="就绪")
         ttk.Label(outer, textvariable=self.status_var, foreground="#555555").pack(fill="x", pady=(6, 0))
@@ -597,10 +687,17 @@ class App(object):
                                  parent=self.root)
             return
 
+        # 勾选本次要打包的目录（默认全选）
+        dlg = SelectDirsDialog(self.root, self.items)
+        self.root.wait_window(dlg)
+        if dlg.result is None:
+            return
+        chosen = dlg.result
+
         # 预检查：目录、日期目录
         problems = []
         valid_items = []
-        for item in self.items:
+        for item in chosen:
             base = item["dir"]
             if not os.path.isdir(base):
                 problems.append("%s\n    目录不存在" % base)
@@ -629,14 +726,9 @@ class App(object):
         self.save()
         self.cancel_flag.clear()
         self.start_btn.configure(state="disabled")
-        self.status_var.set("正在打包…")
-
-        if self.progress_win is not None and self.progress_win.winfo_exists():
-            self.progress_win.destroy()
-        self.progress_win = ProgressWindow(self.root, "打包进度")
-        self.progress_win.log("开始打包，共 %d 个目录" % len(valid_items))
-        self.progress_win.log("输出：%s" % final_path)
-        self.progress_win.log("")
+        self.progress_var.set(0)
+        self.pct_var.set("0%")
+        self.status_var.set("开始打包，共 %d 个目录…" % len(valid_items))
 
         def worker():
             try:
@@ -658,35 +750,23 @@ class App(object):
         try:
             while True:
                 kind, payload = self.msg_queue.get_nowait()
-                win_alive = self.progress_win is not None and self.progress_win.winfo_exists()
-                if kind in ("log", "progress"):
-                    # 日志/进度只发给进度窗口；窗口不在就直接丢弃
-                    if not win_alive:
-                        continue
-                    if kind == "log":
-                        self.progress_win.log(payload)
-                    else:
-                        self.progress_win.set_progress(payload)
+                if kind == "log":
+                    self.status_var.set(str(payload).strip())
+                elif kind == "progress":
+                    value = max(0.0, min(100.0, float(payload)))
+                    self.progress_var.set(value)
+                    self.pct_var.set("%d%%" % round(value))
                 elif kind == "done":
-                    # 结果消息必须处理：恢复按钮与状态栏，无论窗口是否还在
-                    if win_alive:
-                        self.progress_win.finish(True, "打包完成")
-                        self.progress_win.log("")
-                        self.progress_win.log("全部完成：%s" % payload)
+                    self.progress_var.set(100)
+                    self.pct_var.set("100%")
                     self.status_var.set("打包完成：%s" % payload)
                     self.start_btn.configure(state="normal")
                     self.root.bell()
-                    messagebox.showinfo("完成", "打包完成！\n\n%s" % payload,
-                                        parent=self.progress_win if win_alive else self.root)
+                    messagebox.showinfo("完成", "打包完成！\n\n%s" % payload, parent=self.root)
                 elif kind == "error":
-                    if win_alive:
-                        self.progress_win.finish(False, "打包失败")
-                        self.progress_win.log("")
-                        self.progress_win.log("失败：%s" % payload)
-                    self.status_var.set("打包失败")
+                    self.status_var.set("打包失败：%s" % str(payload).strip().splitlines()[0])
                     self.start_btn.configure(state="normal")
-                    messagebox.showerror("失败", payload,
-                                         parent=self.progress_win if win_alive else self.root)
+                    messagebox.showerror("失败", payload, parent=self.root)
         except queue.Empty:
             pass
         self.root.after(200, self._poll_queue)
